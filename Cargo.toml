@@ -1,0 +1,8 @@
+[package]
+name = "nonstop"
+version = "0.0.1"
+authors = ["Nikita Lebedev <eazy-f@live.com>"]
+
+[dependencies]
+rand = "0.5"
+termion = "*"
