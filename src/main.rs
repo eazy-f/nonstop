@@ -4,7 +4,7 @@ extern crate core;
 extern crate num;
 
 use std::sync::mpsc::{self, Sender, Receiver};
-use std::time::SystemTime;
+use std::time::{SystemTime, Duration};
 
 use termion::{color, style};
 use termion::screen::*;
@@ -17,6 +17,7 @@ use core::ops::Index;
 use std::ops::{Div, Add, Mul};
 use std::iter::FromIterator;
 use num::Zero;
+use std::thread::sleep;
 
 use std::io::{Write, stdout, stdin};
 use std::convert::From;
@@ -29,7 +30,7 @@ struct VecGroup<T> {
     children: Option<Vec<VecGroup<T>>>
 }
 
-trait Location {
+trait Location: Clone {
     fn distance(a: &Self, b: &Self) -> Float32;
 }
 
@@ -59,19 +60,22 @@ trait IntoGroup<T> {
     fn group_avg(self, groups: GroupSize) -> Self::GroupType;
 }
 
-impl<T> IntoGroup<Float32> for Vec<Position<T>>
-    where T: Location {
+impl<T, S> IntoGroup<Float32> for S
+    where T: Location,
+          S: Segment<T, Item=Position<T>, Output=Position<T>> {
     type GroupType = VecGroup<Float32>;
     fn group_avg(self, groups: GroupSize) -> Self::GroupType {
         let mut last: Option<Position<T>> = None;
         let mut distances = Vec::new();
         let mut sum = 0;
         for current in self.into_iter() {
-            last.map(|prev| distances.push(Location::distance(&prev.location, &current.location)));
+            for prev in last.iter() {
+                distances.push(Location::distance(&prev.location, &current.location));
+            }
             last = Some(current);
         }
         let leaf_group = |height| VecGroup{height: height, children: None};
-        let height = distances.iter().fold((0.0, 0 as usize), average_folder).0;
+        let height = distances[0..groups].iter().fold((0.0, 0 as usize), average_folder).0;
         let children = Vec::from_iter(distances.into_iter().map(leaf_group));
         VecGroup {
             height: height,
@@ -86,7 +90,7 @@ fn average_folder((current, count): (Float32, usize), sample: &Float32)
                   -> (Float32, usize) {
     let new_count = count + 1;
     let avg = match count {
-        0 => sample.clone(),
+        0 => *sample,
         _ => (f32::from(new_count as u16))*(current + (sample / f32::from(count as u16)))
     };
     (avg, new_count)
@@ -94,20 +98,22 @@ fn average_folder((current, count): (Float32, usize), sample: &Float32)
 
 impl Location for u32 {
     fn distance(a: &Self, b: &Self) -> Float32 {
-        (b - a) as Float32
+        let a = ((*b as i64 - *a as i64) % 1024) as Float32;
+        a
     }
 }
 
+#[derive(Clone)]
 struct Position<T: Location> {
     time: SystemTime,
     location: T
 }
 
-trait Segment {
+trait Segment<T: Location>: Index<usize> + IntoIterator + Clone {
     fn name(&self) -> String;
 }
 
-impl<T: Location> Segment for Vec<Position<T>> {
+impl<T: Location> Segment<T> for Vec<Position<T>> {
     fn name(&self) -> String {
         String::from("no name")
     }
@@ -134,12 +140,13 @@ fn load_test_tracks(segments: Sender<Vec<Position<u32>>>) {
     segments.send(positions);
 }
 
-fn show_segment<W: Write, T: Segment>(screen: &mut AlternateScreen<W>, segment: &T) {
+fn show_segment<W: Write, L: Location, T: Segment<L>>(screen: &mut AlternateScreen<W>, segment: &T) {
     write!(screen, "{}", &segment.name());
     screen.flush().unwrap();
 }
 
-fn window_run<T: Segment, W: Write>(segments: Receiver<T>, screen: &mut AlternateScreen<W>) {
+fn window_run<L, T, W>(segments: Receiver<T>, screen: &mut AlternateScreen<W>)
+    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>>, W: Write {
     let mut available_segments = Vec::new();
     write!(screen, "{}", termion::clear::All);
     for segment in segments.iter() {
@@ -153,17 +160,17 @@ fn window_run<T: Segment, W: Write>(segments: Receiver<T>, screen: &mut Alternat
     }
     match available_segments.len() {
         0 => (),
-        1 => state_segment_edit(screen, &available_segments[0]),
+        1 => state_segment_edit(screen, available_segments[0].clone()),
         _ => state_select_segment(screen)
     }
 }
 
-fn state_segment_edit<T: Segment, W: Write>(screen: &mut AlternateScreen<W>,
-                                             segment: &T) {
+fn state_segment_edit<T, W, L>(screen: &mut AlternateScreen<W>, segment: T)
+    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>>, W: Write {
     write!(screen, "{}{}", termion::clear::All, termion::cursor::Goto(1,1));
     write!(screen, "segment length: {}", 12);
     let bars = 20;
-    /*segment.group_avg(bars);*/
+    segment.group_avg(bars);
     screen.flush().unwrap();
     state_wait_for_exit(screen);
 }
