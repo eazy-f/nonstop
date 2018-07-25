@@ -18,16 +18,47 @@ use std::ops::{Div, Add, Mul};
 use std::iter::FromIterator;
 use num::Zero;
 use std::thread::sleep;
+use std::slice::Iter;
 
 use std::io::{Write, stdout, stdin};
 use std::convert::From;
+use std::vec::IntoIter;
+use std::fmt::Display;
+use std::fmt;
+use std::cmp::Ordering;
 
 type GroupSize = usize;
 type Float32 = f32;
 
-struct VecGroup<T> {
+struct VecGroup<T: Display + PartialOrd + PartialEq> {
     height: T,
     children: Option<Vec<VecGroup<T>>>
+}
+
+impl<T: Display + PartialOrd + PartialEq> fmt::Display for VecGroup<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.height)
+    }
+}
+
+impl<T: Display + PartialOrd + PartialEq> PartialEq for VecGroup<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.height == other.height
+    }
+}
+
+impl<T: Display + PartialOrd + PartialEq> Eq for VecGroup<T> {}
+
+impl<T: Display + PartialOrd + PartialEq> PartialOrd for VecGroup<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.height.partial_cmp(&other.height)
+    }
+}
+
+impl<T: Display + PartialOrd + PartialEq> Ord for VecGroup<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.partial_cmp(other).unwrap()
+    }
 }
 
 trait Location: Clone {
@@ -35,15 +66,19 @@ trait Location: Clone {
 }
 
 /* Collection: Index<usize, Output=Group<T>>*/
-trait Group<T> {
-    type Collection: Index<usize>;
+trait Group<T: Display + PartialOrd + PartialEq> {
+    type Collection: IntoIterator;
+    /*type ChildrenIter: Iterator;*/
     fn height(self) -> T;
     fn children(self) -> Option<Self::Collection>;
     fn len(self) -> GroupSize;
+    /* FIXME: no need for a trait object */
+    fn iter<'a>(&'a self) -> Box<Iterator<Item=&Self> + 'a>;
 }
 
-impl<T> Group<T> for VecGroup<T> {
+impl<T: Display + PartialOrd + PartialEq> Group<T> for VecGroup<T> {
     type Collection = Vec<VecGroup<T>>;
+    /*type ChildrenIter = Iter<'a, VecGroup<T>>;*/
     fn height(self) -> T {
         self.height
     }
@@ -53,9 +88,17 @@ impl<T> Group<T> for VecGroup<T> {
     fn len(self) -> GroupSize {
         self.children.map_or(0, |v| v.len())
     }
+    fn iter<'a>(&'a self) -> Box<Iterator<Item=&Self> + 'a> {
+        let empty = Vec::new();
+        let children: &Option<Vec<VecGroup<T>>> = &self.children;
+        match children {
+            Some(ref c) => Box::new(c.into_iter()),
+            None => Box::new(empty.into_iter())
+        }
+    }
 }
 
-trait IntoGroup<T> {
+trait IntoGroup<T: Display + PartialOrd + PartialEq> {
     type GroupType: Group<T>;
     fn group_avg(self, groups: GroupSize) -> Self::GroupType;
 }
@@ -170,7 +213,12 @@ fn state_segment_edit<T, W, L>(screen: &mut AlternateScreen<W>, segment: T)
     write!(screen, "{}{}", termion::clear::All, termion::cursor::Goto(1,1));
     write!(screen, "segment length: {}", 12);
     let bars = 20;
-    segment.group_avg(bars);
+    let group = segment.group_avg(bars);
+    let max = group.iter().max().unwrap().height;
+    let normalized = group.iter().map(|x| (x.height * 100.0) / max);
+    for bar in normalized {
+        write!(screen, "|{}|", bar);
+    }
     screen.flush().unwrap();
     state_wait_for_exit(screen);
 }
