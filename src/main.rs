@@ -1,28 +1,21 @@
 extern crate termion;
 extern crate rand;
 extern crate core;
-extern crate num;
 
 use std::sync::mpsc::{self, Sender, Receiver};
-use std::time::{SystemTime, Duration};
+use std::time::SystemTime;
 
-use termion::{color, style};
+use termion::color;
 use termion::screen::*;
 use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use std::string::String;
-use rand::distributions::Range;
 use core::ops::Index;
-use std::ops::{Div, Add, Mul};
 use std::iter::FromIterator;
-use num::Zero;
-use std::thread::sleep;
-use std::slice::Iter;
 
 use std::io::{Write, stdout, stdin};
 use std::convert::From;
-use std::vec::IntoIter;
 use std::fmt::Display;
 use std::fmt;
 use std::cmp::Ordering;
@@ -105,21 +98,21 @@ trait IntoGroup<T: Display + PartialOrd + PartialEq> {
 
 impl<T, S> IntoGroup<Float32> for S
     where T: Location,
-          S: Segment<T, Item=Position<T>, Output=Position<T>> {
+          S: Segment<T, Item=Position<T>, Output=Position<T>>
+{
     type GroupType = VecGroup<Float32>;
     fn group_avg(self, groups: GroupSize) -> Self::GroupType {
         let mut last: Option<Position<T>> = None;
         let mut distances = Vec::new();
-        let mut sum = 0;
         for current in self.into_iter() {
             for prev in last.iter() {
                 distances.push(Location::distance(&prev.location, &current.location));
             }
             last = Some(current);
         }
-        let leaf_group = |height| VecGroup{height: height, children: None};
-        let height = distances[0..groups].iter().fold((0.0, 0 as usize), average_folder).0;
-        let children = Vec::from_iter(distances.into_iter().map(leaf_group));
+        let leaf_group = |height: &Float32| VecGroup{height: *height, children: None};
+        let height = distances.iter().fold((0.0, 0 as usize), average_folder).0;
+        let children = Vec::from_iter(distances[0..groups].into_iter().map(leaf_group));
         VecGroup {
             height: height,
             children: Some(children)
@@ -189,7 +182,8 @@ fn show_segment<W: Write, L: Location, T: Segment<L>>(screen: &mut AlternateScre
 }
 
 fn window_run<L, T, W>(segments: Receiver<T>, screen: &mut AlternateScreen<W>)
-    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>>, W: Write {
+    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>>, W: Write
+{
     let mut available_segments = Vec::new();
     write!(screen, "{}", termion::clear::All);
     for segment in segments.iter() {
@@ -208,17 +202,37 @@ fn window_run<L, T, W>(segments: Receiver<T>, screen: &mut AlternateScreen<W>)
     }
 }
 
+struct BarWindow {
+    heights: Vec<f32>
+}
+
+impl BarWindow {
+    fn new<T: Iterator<Item=Float32>>(from: T) -> BarWindow {
+        BarWindow{heights: from.map(|x| x.max(0.0).min(1.0)).collect()}
+    }
+
+    fn draw<W: Write>(&self, screen: &mut AlternateScreen<W>, x: u16, y: u16, width: u16, height: u16) {
+        let win_width = width.min(self.heights.len() as u16);
+        let heights: Vec<u16> = self.heights.iter().map(|x| (x * (height as f32)) as u16).collect();
+        for i in 0..height {
+            write!(screen, "{}", termion::cursor::Goto(x, y + (height - i)));
+            let line: String = heights.iter().map(|h| if *h < (i+1) {' '} else {'*'}).collect();
+            write!(screen, "{}", line);
+        }
+    }
+}
+
 fn state_segment_edit<T, W, L>(screen: &mut AlternateScreen<W>, segment: T)
-    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>>, W: Write {
+    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>>, W: Write
+{
     write!(screen, "{}{}", termion::clear::All, termion::cursor::Goto(1,1));
     write!(screen, "segment length: {}", 12);
     let bars = 20;
     let group = segment.group_avg(bars);
     let max = group.iter().max().unwrap().height;
-    let normalized = group.iter().map(|x| (x.height * 100.0) / max);
-    for bar in normalized {
-        write!(screen, "|{}|", bar);
-    }
+    let normalized = group.iter().map(|x| x.height / max);
+    let bar_window = BarWindow::new(normalized);
+    bar_window.draw(screen, 1, 1, 20, 20);
     screen.flush().unwrap();
     state_wait_for_exit(screen);
 }
