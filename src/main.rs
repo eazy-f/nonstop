@@ -19,9 +19,25 @@ use std::convert::From;
 use std::fmt::Display;
 use std::fmt;
 use std::cmp::Ordering;
+use std::thread;
 
 type GroupSize = usize;
 type Float32 = f32;
+
+#[derive(Debug)]
+enum UIMessage {
+    UIQuit,
+    UIUpdate,
+    UIDataSourceUpdate(u32),
+    UIKeyPress(termion::event::Key)
+}
+
+struct UIBox {
+    x: u16,
+    y: u16,
+    width: u16,
+    height: u16
+}
 
 struct VecGroup<T: Display + PartialOrd + PartialEq> {
     height: T,
@@ -54,7 +70,7 @@ impl<T: Display + PartialOrd + PartialEq> Ord for VecGroup<T> {
     }
 }
 
-trait Location: Clone {
+trait Location: Clone + Send {
     fn distance(a: &Self, b: &Self) -> Float32;
 }
 
@@ -145,7 +161,7 @@ struct Position<T: Location> {
     location: T
 }
 
-trait Segment<T: Location>: Index<usize> + IntoIterator + Clone {
+trait Segment<T: Location>: Index<usize> + IntoIterator + Clone + Send {
     fn name(&self) -> String;
 }
 
@@ -182,72 +198,186 @@ fn show_segment<W: Write, L: Location, T: Segment<L>>(screen: &mut AlternateScre
 }
 
 fn window_run<L, T, W>(segments: Receiver<T>, screen: &mut AlternateScreen<W>)
-    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>>, W: Write
+    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>> + 'static, W: Write
 {
-    let mut available_segments = Vec::new();
+    let (ui_tx, ui_rx) = mpsc::channel();
+    let beacon = 12; /* FIXME: such an ugly hack */
+    let mut elements = initial_ui_elements(&ui_tx, segments);
+    ui_tx.send(UIMessage::UIUpdate);
     write!(screen, "{}", termion::clear::All);
-    for segment in segments.iter() {
-        if available_segments.len() == 1 {
-            show_segment(screen, &available_segments[available_segments.len() - 1]);
-        }
-        available_segments.push(segment);
-        if available_segments.len() > 1 {
-            show_segment(screen, &available_segments[available_segments.len() - 1]);
+    for message in ui_rx.iter() {
+        match message {
+            UIMessage::UIUpdate => {
+                elements.iter().for_each(|x| x.draw(screen));
+                screen.flush().unwrap();
+            },
+            UIMessage::UIDataSourceUpdate(_) |
+            UIMessage::UIKeyPress(_) => {
+                let mut stuff: Vec<Box<UIElement<W>>> = elements.iter_mut().filter_map(|x| x.update(&message, &beacon)).collect();
+                if stuff.len() > 0 {
+                    ui_tx.send(UIMessage::UIUpdate);
+                }
+                elements.append(&mut stuff);
+            },
+            UIMessage::UIQuit => break
         }
     }
-    match available_segments.len() {
-        0 => (),
-        1 => state_segment_edit(screen, available_segments[0].clone()),
-        _ => state_select_segment(screen)
-    }
+}
+
+trait UIElement<W: Write> {
+    fn draw(&self, screen: &mut AlternateScreen<W>) {}
+    fn update<'a>(&mut self, message: &UIMessage, beacon: &'a u32) -> Option<Box<UIElement<W> + 'a>> {None}
 }
 
 struct BarWindow {
-    heights: Vec<f32>
+    heights: Vec<f32>,
+    ui_box: UIBox
+}
+
+struct ElementQuit<'a> {
+    ui_events: &'a Sender<UIMessage>
+}
+
+struct ElementSegmentSelector<'a, T, L, W>
+    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>>, W: Write
+{
+    ui_events: &'a Sender<UIMessage>,
+    ui_box: UIBox,
+    available_segments: Vec<T>,
+    segments: Receiver<T>,
+    disconnected: bool,
+    data_source_id: u32,
+    type_trick: Option<W>
 }
 
 impl BarWindow {
-    fn new<T: Iterator<Item=Float32>>(from: T) -> BarWindow {
-        BarWindow{heights: from.map(|x| x.max(0.0).min(1.0)).collect()}
+    fn new<T: Iterator<Item=Float32>>(from: T, ui_box: UIBox) -> BarWindow {
+        BarWindow{heights: from.map(|x| x.max(0.0).min(1.0)).collect(), ui_box: ui_box}
     }
+}
 
-    fn draw<W: Write>(&self, screen: &mut AlternateScreen<W>, x: u16, y: u16, width: u16, height: u16) {
-        let win_width = width.min(self.heights.len() as u16);
-        let heights: Vec<u16> = self.heights.iter().map(|x| (x * (height as f32)) as u16).collect();
+impl<W: Write> UIElement<W> for BarWindow {
+    fn draw(&self, screen: &mut AlternateScreen<W>) {
+        let ui_box = &self.ui_box;
+        let win_width = self.heights.len().min(ui_box.width as usize);
+        let height = ui_box.height;
+        let heights: Vec<u16> = self.heights[0..win_width].iter().map(|x| (x * (height as f32)) as u16).collect();
         for i in 0..height {
-            write!(screen, "{}", termion::cursor::Goto(x, y + (height - i)));
+            write!(screen, "{}", termion::cursor::Goto(ui_box.x, ui_box.y + (height - i)));
             let line: String = heights.iter().map(|h| if *h < (i+1) {' '} else {'*'}).collect();
             write!(screen, "{}", line);
         }
     }
 }
 
-fn state_segment_edit<T, W, L>(screen: &mut AlternateScreen<W>, segment: T)
-    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>>, W: Write
+impl<'a> ElementQuit<'a> {
+    fn new(ui_events: &'a Sender<UIMessage>) -> ElementQuit<'a> {
+        let worker_ui_events = ui_events.clone();
+        thread::spawn(move || {
+            for c in stdin().keys() {
+                worker_ui_events.send(UIMessage::UIKeyPress(c.unwrap()));
+            }
+        });
+        ElementQuit{ui_events: ui_events}
+    }
+}
+
+impl<'a, W: Write> UIElement<W> for ElementQuit<'a> {
+    fn update<'b>(&mut self, message: &UIMessage, _beacon: &'b u32) -> Option<Box<UIElement<W> + 'b>> {
+        match message {
+            UIMessage::UIKeyPress(Key::Char('q')) => {self.ui_events.send(UIMessage::UIQuit);},
+            _ => ()
+        };
+        None
+    }
+}
+
+impl<'a, T, L, W> ElementSegmentSelector<'a, T, L, W>
+    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>> + 'static, W: Write
 {
-    write!(screen, "{}{}", termion::clear::All, termion::cursor::Goto(1,1));
-    write!(screen, "segment length: {}", 12);
-    let bars = 20;
-    let group = segment.group_avg(bars);
+    fn new(segments: Receiver<T>, ui_events: &'a Sender<UIMessage>, ui_box: UIBox) -> ElementSegmentSelector<'a, T, L, W> {
+        let (segments_tx, segments_rx) = mpsc::channel();
+        let data_source_id = 1;
+        let worker_ui_events = ui_events.clone();
+        thread::spawn(move || dispatch_segments(segments, segments_tx, worker_ui_events, data_source_id));
+        ElementSegmentSelector{
+            ui_events: ui_events,
+            ui_box: ui_box,
+            available_segments: Vec::new(),
+            segments: segments_rx,
+            disconnected: false,
+            data_source_id: data_source_id,
+            type_trick: None
+        }
+    }
+
+    fn data_source_update(&mut self) -> Option<Box<UIElement<W>>> {
+        while true {
+            match self.segments.try_recv() {
+                Err(err) => {
+                    if err == std::sync::mpsc::TryRecvError::Disconnected {
+                        self.disconnected = true
+                    }
+                    break
+                }
+                Ok(segment) => {
+                    self.available_segments.push(segment);
+                }
+            }
+        }
+        match (self.disconnected, self.available_segments.len()) {
+            (true, 0) => {
+                self.ui_events.send(UIMessage::UIQuit);
+                None
+            },
+            (true, 1) => Some(Box::new(state_segment_edit(self.available_segments[0].clone()))),
+            _ => {
+                self.ui_events.send(UIMessage::UIUpdate);
+                None
+            }
+        }
+    }
+}
+
+impl<'a, T, L, W> UIElement<W> for ElementSegmentSelector<'a, T, L, W>
+    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>> + 'static, W: Write
+{
+    fn update<'b>(&mut self, message: &UIMessage, _beacon: &'b u32) -> Option<Box<UIElement<W> + 'b>> {
+        match message {
+            UIMessage::UIDataSourceUpdate(id) if *id == self.data_source_id => self.data_source_update(),
+            _ => None
+        }
+    }
+}
+
+fn dispatch_segments<L, T>(from: Receiver<T>, to: Sender<T>, ui_events: Sender<UIMessage>, data_source_id: u32)
+    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>>
+{
+    for segment in from.iter() {
+        to.send(segment);
+        ui_events.send(UIMessage::UIDataSourceUpdate(data_source_id));
+    }
+}
+
+fn state_segment_edit<L, T>(segment: T) -> BarWindow
+    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>>
+{
+    let bars = 40;
+    let group = segment.group_avg(bars as GroupSize);
     let max = group.iter().max().unwrap().height;
     let normalized = group.iter().map(|x| x.height / max);
-    let bar_window = BarWindow::new(normalized);
-    bar_window.draw(screen, 1, 1, 20, 20);
-    screen.flush().unwrap();
-    state_wait_for_exit(screen);
+    BarWindow::new(normalized, whole_window())
 }
 
-fn state_select_segment<W: Write>(screen: &mut AlternateScreen<W>) {
-    state_wait_for_exit(screen);
+fn initial_ui_elements<'a, L, T, W>(ui_events: &'a Sender<UIMessage>, segments: Receiver<T>) -> Vec<Box<UIElement<W> + 'a>>
+    where L: Location + 'a, T: Segment<L, Item=Position<L>, Output=Position<L>> + 'static, W: Write + 'a
+{
+    vec![Box::new(ElementQuit::new(ui_events)),
+         Box::new(ElementSegmentSelector::new(segments, ui_events, whole_window()))]
 }
 
-fn state_wait_for_exit<W: Write>(screen: &mut AlternateScreen<W>) {
-    for c in stdin().keys() {
-        if Key::Char('q') == c.unwrap() {
-            break
-        }
-        screen.flush().unwrap();
-    }
+fn whole_window() -> UIBox {
+    UIBox{x: 1, y: 1, width: 40, height: 20}
 }
 
 fn main() {
