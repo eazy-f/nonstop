@@ -11,7 +11,7 @@ use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use std::string::String;
-use core::ops::Index;
+use core::ops::{Index, Add};
 use std::iter::FromIterator;
 
 use std::io::{Write, stdout, stdin};
@@ -231,7 +231,9 @@ trait UIElement<W: Write> {
 
 struct BarWindow {
     heights: Vec<f32>,
-    ui_box: UIBox
+    ui_box: UIBox,
+    ui_events: Sender<UIMessage>,
+    selected: Option<GroupSize>
 }
 
 struct ElementQuit<'a> {
@@ -251,8 +253,29 @@ struct ElementSegmentSelector<'a, T, L, W>
 }
 
 impl BarWindow {
-    fn new<T: Iterator<Item=Float32>>(from: T, ui_box: UIBox) -> BarWindow {
-        BarWindow{heights: from.map(|x| x.max(0.0).min(1.0)).collect(), ui_box: ui_box}
+    fn new<T: Iterator<Item=Float32>>(from: T, ui_events: Sender<UIMessage>, ui_box: UIBox) -> BarWindow
+    {
+        BarWindow{
+            heights: from.map(|x| x.max(0.0).min(1.0)).collect(),
+            ui_box: ui_box,
+            ui_events: ui_events,
+            selected: None
+        }
+    }
+
+    fn key_pressed(&mut self, key: Key) {
+        let width = self.ui_box.width as usize;
+        let center = width / 2;
+        let curent_pos = self.selected.unwrap_or(center);
+        let min = 0;
+        let max = (self.heights.len().min(width as usize) - 1);
+        let new_pos = match key {
+            Key::Left | Key::Char('h') if curent_pos > min => curent_pos - 1,
+            Key::Right | Key::Char('l') if curent_pos < max => curent_pos + 1,
+            _ => curent_pos
+        };
+        self.selected = Some(new_pos);
+        self.ui_events.send(UIMessage::UIUpdate);
     }
 }
 
@@ -264,9 +287,30 @@ impl<W: Write> UIElement<W> for BarWindow {
         let heights: Vec<u16> = self.heights[0..win_width].iter().map(|x| (x * (height as f32)) as u16).collect();
         for i in 0..height {
             write!(screen, "{}", termion::cursor::Goto(ui_box.x, ui_box.y + (height - i)));
-            let line: String = heights.iter().map(|h| if *h < (i+1) {' '} else {'*'}).collect();
+            write!(screen, "{}", color::Fg(color::Red));
+            let filled = '*';
+            let line: String = heights.iter().map(|y| if *y < (i+1) {' '} else {filled}).collect();
             write!(screen, "{}", line);
+            let selector = |x: &usize| {
+                let pos = termion::cursor::Goto(*x as u16 + ui_box.x, ui_box.y + (height - i));
+                if heights[*x] > i {
+                    write!(screen, "{}{}{}", pos, color::Fg(color::Blue), filled);
+                }
+            };
+            self.selected.iter().for_each(selector);
         }
+    }
+
+    fn update<'b>(&mut self, message: &UIMessage, _beacon: &'b u32) -> Option<Box<UIElement<W> + 'b>> {
+        match message {
+            UIMessage::UIKeyPress(key)
+                if *key == Key::Left
+                || *key == Key::Right
+                || *key == Key::Char('h')
+                || *key == Key::Char('l') => self.key_pressed(*key),
+            _ => ()
+        };
+        None
     }
 }
 
@@ -312,7 +356,7 @@ impl<'a, T, L, W> ElementSegmentSelector<'a, T, L, W>
     }
 
     fn data_source_update(&mut self) -> Option<Box<UIElement<W>>> {
-        while true {
+        loop {
             match self.segments.try_recv() {
                 Err(err) => {
                     if err == std::sync::mpsc::TryRecvError::Disconnected {
@@ -330,7 +374,7 @@ impl<'a, T, L, W> ElementSegmentSelector<'a, T, L, W>
                 self.ui_events.send(UIMessage::UIQuit);
                 None
             },
-            (true, 1) => Some(Box::new(state_segment_edit(self.available_segments[0].clone()))),
+            (true, 1) => Some(Box::new(state_segment_edit(self.available_segments[0].clone(), self.ui_events))),
             _ => {
                 self.ui_events.send(UIMessage::UIUpdate);
                 None
@@ -343,6 +387,7 @@ impl<'a, T, L, W> UIElement<W> for ElementSegmentSelector<'a, T, L, W>
     where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>> + 'static, W: Write
 {
     fn update<'b>(&mut self, message: &UIMessage, _beacon: &'b u32) -> Option<Box<UIElement<W> + 'b>> {
+        let used_keys = [Key::Left, Key::Right, Key::Char('h'), Key::Char('l')];
         match message {
             UIMessage::UIDataSourceUpdate(id) if *id == self.data_source_id => self.data_source_update(),
             _ => None
@@ -359,14 +404,14 @@ fn dispatch_segments<L, T>(from: Receiver<T>, to: Sender<T>, ui_events: Sender<U
     }
 }
 
-fn state_segment_edit<L, T>(segment: T) -> BarWindow
+fn state_segment_edit<L, T>(segment: T, ui_events: &Sender<UIMessage>) -> BarWindow
     where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>>
 {
     let bars = 40;
     let group = segment.group_avg(bars as GroupSize);
     let max = group.iter().max().unwrap().height;
     let normalized = group.iter().map(|x| x.height / max);
-    BarWindow::new(normalized, whole_window())
+    BarWindow::new(normalized, ui_events.clone(), whole_window())
 }
 
 fn initial_ui_elements<'a, L, T, W>(ui_events: &'a Sender<UIMessage>, segments: Receiver<T>) -> Vec<Box<UIElement<W> + 'a>>
