@@ -11,7 +11,7 @@ use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use std::string::String;
-use core::ops::{Index, Add};
+use core::ops::Index;
 use std::iter::FromIterator;
 
 use std::io::{Write, stdout, stdin};
@@ -22,6 +22,7 @@ use std::cmp::Ordering;
 use std::thread;
 
 type GroupSize = usize;
+type GroupIndex = GroupSize;
 type Float32 = f32;
 
 #[derive(Debug)]
@@ -75,11 +76,11 @@ trait Location: Clone + Send {
 }
 
 /* Collection: Index<usize, Output=Group<T>>*/
-trait Group<T: Display + PartialOrd + PartialEq> {
-    type Collection: IntoIterator;
+trait Group<T: Display + PartialOrd + PartialEq>: Ord {
+    type Collection: IntoIterator + Index<GroupIndex, Output=Self>;
     /*type ChildrenIter: Iterator;*/
-    fn height(self) -> T;
-    fn children(self) -> Option<Self::Collection>;
+    fn height(&self) -> &T;
+    fn children(&self) -> Option<&Self::Collection>;
     fn len(self) -> GroupSize;
     /* FIXME: no need for a trait object */
     fn iter<'a>(&'a self) -> Box<Iterator<Item=&Self> + 'a>;
@@ -88,11 +89,11 @@ trait Group<T: Display + PartialOrd + PartialEq> {
 impl<T: Display + PartialOrd + PartialEq> Group<T> for VecGroup<T> {
     type Collection = Vec<VecGroup<T>>;
     /*type ChildrenIter = Iter<'a, VecGroup<T>>;*/
-    fn height(self) -> T {
-        self.height
+    fn height(&self) -> &T {
+        &self.height
     }
-    fn children(self) -> Option<Self::Collection> {
-        self.children
+    fn children(&self) -> Option<&Self::Collection> {
+        self.children.as_ref()
     }
     fn len(self) -> GroupSize {
         self.children.map_or(0, |v| v.len())
@@ -229,11 +230,13 @@ trait UIElement<W: Write> {
     fn update<'a>(&mut self, message: &UIMessage, beacon: &'a u32) -> Option<Box<UIElement<W> + 'a>> {None}
 }
 
-struct BarWindow {
-    heights: Vec<f32>,
+struct BarWindow<T: Group<Float32>> {
+    heights: Option<Vec<f32>>,
     ui_box: UIBox,
     ui_events: Sender<UIMessage>,
-    selected: Option<GroupSize>
+    selected: Option<GroupSize>,
+    levels: Vec<GroupIndex>,
+    group: T
 }
 
 struct ElementQuit<'a> {
@@ -252,14 +255,16 @@ struct ElementSegmentSelector<'a, T, L, W>
     type_trick: Option<W>
 }
 
-impl BarWindow {
-    fn new<T: Iterator<Item=Float32>>(from: T, ui_events: Sender<UIMessage>, ui_box: UIBox) -> BarWindow
+impl<T: Group<Float32>> BarWindow<T> {
+    fn new(group: T, ui_events: Sender<UIMessage>, ui_box: UIBox) -> BarWindow<T>
     {
         BarWindow{
-            heights: from.map(|x| x.max(0.0).min(1.0)).collect(),
+            heights: None,
             ui_box: ui_box,
             ui_events: ui_events,
-            selected: None
+            selected: None,
+            group: group,
+            levels: Vec::new()
         }
     }
 
@@ -268,23 +273,61 @@ impl BarWindow {
         let center = width / 2;
         let curent_pos = self.selected.unwrap_or(center);
         let min = 0;
-        let max = (self.heights.len().min(width as usize) - 1);
+        let heights = self.calculate_heights();
+        let max = heights.len().min(width as usize) - 1;
         let new_pos = match key {
-            Key::Left | Key::Char('h') if curent_pos > min => curent_pos - 1,
-            Key::Right | Key::Char('l') if curent_pos < max => curent_pos + 1,
-            _ => curent_pos
+            Key::Left | Key::Char('h') if curent_pos > min =>
+                Some(curent_pos - 1),
+            Key::Right | Key::Char('l') if curent_pos < max =>
+                Some(curent_pos + 1),
+            Key::Char('\n') => {
+                let selected = self.selected; /* FIXME: make a oneliner */
+                selected.iter().for_each(|x| self.select_subgroup(*x));
+                None
+            },
+            Key::Char('u') => self.select_supergroup(),
+            _ => self.selected
         };
-        self.selected = Some(new_pos);
+        self.selected = new_pos;
         self.ui_events.send(UIMessage::UIUpdate);
+    }
+
+    fn select_subgroup(&mut self, subgroup: GroupIndex) {
+        self.heights = None;
+        self.levels.push(subgroup);
+    }
+
+    fn select_supergroup(&mut self) -> Option<GroupIndex> {
+        self.heights = None;
+        self.levels.pop()
+    }
+
+    fn calculate_heights(&self) -> Vec<Float32> {
+        let group = self.levels.iter().fold(&self.group, group_level_walker);
+        let max = group.iter().max().unwrap().height();
+        let normalize = |x: &T| -> Float32 {
+            (x.height() / max).max(0.0).min(1.0)
+        };
+        group.iter().map(normalize).collect()
     }
 }
 
-impl<W: Write> UIElement<W> for BarWindow {
+fn group_level_walker<'a, T>(group: &'a T, i: &GroupIndex) -> &'a T
+    where T: Group<Float32>
+{
+    group.children().map_or(group, |children| &children[*i])
+}
+
+
+impl<T, W> UIElement<W> for BarWindow<T>
+    where W: Write, T: Group<Float32>
+{
     fn draw(&self, screen: &mut AlternateScreen<W>) {
         let ui_box = &self.ui_box;
-        let win_width = self.heights.len().min(ui_box.width as usize);
+        let float_heights = self.calculate_heights();
+        let win_width = float_heights.len().min(ui_box.width as usize);
         let height = ui_box.height;
-        let heights: Vec<u16> = self.heights[0..win_width].iter().map(|x| (x * (height as f32)) as u16).collect();
+        let heights: Vec<u16> = float_heights[0..win_width].iter().map(|x| (x * (height as f32)) as u16).collect();
         for i in 0..height {
             write!(screen, "{}", termion::cursor::Goto(ui_box.x, ui_box.y + (height - i)));
             write!(screen, "{}", color::Fg(color::Red));
@@ -306,6 +349,8 @@ impl<W: Write> UIElement<W> for BarWindow {
             UIMessage::UIKeyPress(key)
                 if *key == Key::Left
                 || *key == Key::Right
+                || *key == Key::Char('\n')
+                || *key == Key::Char('u')
                 || *key == Key::Char('h')
                 || *key == Key::Char('l') => self.key_pressed(*key),
             _ => ()
@@ -387,7 +432,6 @@ impl<'a, T, L, W> UIElement<W> for ElementSegmentSelector<'a, T, L, W>
     where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>> + 'static, W: Write
 {
     fn update<'b>(&mut self, message: &UIMessage, _beacon: &'b u32) -> Option<Box<UIElement<W> + 'b>> {
-        let used_keys = [Key::Left, Key::Right, Key::Char('h'), Key::Char('l')];
         match message {
             UIMessage::UIDataSourceUpdate(id) if *id == self.data_source_id => self.data_source_update(),
             _ => None
@@ -404,14 +448,12 @@ fn dispatch_segments<L, T>(from: Receiver<T>, to: Sender<T>, ui_events: Sender<U
     }
 }
 
-fn state_segment_edit<L, T>(segment: T, ui_events: &Sender<UIMessage>) -> BarWindow
-    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>>
+fn state_segment_edit<L, T>(segment: T, ui_events: &Sender<UIMessage>) -> BarWindow<T::GroupType>
+    where L: Location,
+          T: Segment<L, Item=Position<L>, Output=Position<L>> + IntoGroup<Float32>,
 {
-    let bars = 40;
-    let group = segment.group_avg(bars as GroupSize);
-    let max = group.iter().max().unwrap().height;
-    let normalized = group.iter().map(|x| x.height / max);
-    BarWindow::new(normalized, ui_events.clone(), whole_window())
+    let group = segment.group_avg(40 as GroupSize);
+    BarWindow::new(group, ui_events.clone(), whole_window())
 }
 
 fn initial_ui_elements<'a, L, T, W>(ui_events: &'a Sender<UIMessage>, segments: Receiver<T>) -> Vec<Box<UIElement<W> + 'a>>
