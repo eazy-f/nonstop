@@ -12,7 +12,6 @@ use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use std::string::String;
 use core::ops::Index;
-use std::iter::FromIterator;
 
 use std::io::{Write, stdout, stdin};
 use std::convert::From;
@@ -128,31 +127,53 @@ impl<T, S> IntoGroup<Float32> for S
             last = Some(current);
         }
         let leaf_group = |height: &Float32| VecGroup{height: *height, children: None};
-        let height = distances.iter().fold((0.0, 0 as usize), average_folder).0;
-        let children = Vec::from_iter(distances[0..groups].into_iter().map(leaf_group));
-        VecGroup {
-            height: height,
-            children: Some(children)
-        }
+        build_distances_group(distances.iter().map(leaf_group).collect(), groups)
+    }
+
+}
+
+fn build_distances_group(groups: Vec<VecGroup<Float32>>, limit: GroupSize) -> VecGroup<Float32> {
+    let mut chunks = vec![Box::new(Vec::new())]; /* FIXME: use arrays - size is known */
+    groups.into_iter().for_each(|group|
+                                if chunks.last().unwrap().len() < limit {
+                                    chunks.last_mut().unwrap().push(group)
+                                } else {
+                                    chunks.push(Box::new(vec!(group)))
+                                }
+    );
+    let grouped: Vec<VecGroup<Float32>> = chunks.into_iter().map(build_supergroup).collect();
+    match grouped.len() {
+        1 => grouped.into_iter().fold(None, |_, v| Some(v)).unwrap(), /* FIXME: fix the borrowing here */
+        _ => build_distances_group(grouped, limit)
     }
 }
 
+fn build_supergroup(groups: Box<Vec<VecGroup<Float32>>>) -> VecGroup<Float32> {
+    let height = groups.iter().map(|g| *g.height()).fold((0.0, 0 as usize), average_folder).0;
+    VecGroup {
+        height: height,
+        children: Some(*groups)
+    }
+}
+
+
 /*fn average_folder<T>((current, count): (T, usize), sample: T) -> (T, usize)
     where T: Div<Output=T> + Add + Mul + From<usize> {*/
-fn average_folder((current, count): (Float32, usize), sample: &Float32)
+fn average_folder((current, count): (Float32, usize), sample: Float32)
                   -> (Float32, usize) {
     let new_count = count + 1;
-    let avg = match count {
-        0 => *sample,
-        _ => (f32::from(new_count as u16))*(current + (sample / f32::from(count as u16)))
-    };
+    let avg = (f32::from(count as u16)*current + sample) / f32::from(new_count as u16);
     (avg, new_count)
 }
 
 impl Location for u32 {
     fn distance(a: &Self, b: &Self) -> Float32 {
         let a = ((*b as i64 - *a as i64) % 1024) as Float32;
-        a
+        if a > 0.0 {
+            a
+        } else {
+            -a
+        }
     }
 }
 
@@ -315,7 +336,15 @@ impl<T: Group<Float32>> BarWindow<T> {
 fn group_level_walker<'a, T>(group: &'a T, i: &GroupIndex) -> &'a T
     where T: Group<Float32>
 {
-    group.children().map_or(group, |children| &children[*i])
+    let go_deeper = |children: &'a T::Collection| -> &'a T {
+        let child = &children[*i];
+        if child.children().is_some() {
+            child
+        } else {
+            group
+        }
+    };
+    group.children().map_or(group, go_deeper)
 }
 
 
@@ -328,6 +357,7 @@ impl<T, W> UIElement<W> for BarWindow<T>
         let win_width = float_heights.len().min(ui_box.width as usize);
         let height = ui_box.height;
         let heights: Vec<u16> = float_heights[0..win_width].iter().map(|x| (x * (height as f32)) as u16).collect();
+        println!("got group of {} elements and height of {}", heights.len(), self.group.height());
         for i in 0..height {
             write!(screen, "{}", termion::cursor::Goto(ui_box.x, ui_box.y + (height - i)));
             write!(screen, "{}", color::Fg(color::Red));
@@ -472,4 +502,14 @@ fn main() {
     let mut screen = window_init();
     load_test_tracks(tx);
     window_run(rx, &mut screen);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn average() {
+        let values = vec![-2.5, 1.0, 4.5];
+        assert_eq!(values.into_iter().fold((0.0, 0 as usize), average_folder), (1.0, 3));
+    }
 }
