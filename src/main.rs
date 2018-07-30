@@ -19,6 +19,7 @@ use std::fmt::Display;
 use std::fmt;
 use std::cmp::Ordering;
 use std::thread;
+use std::iter;
 
 type GroupSize = usize;
 type GroupIndex = GroupSize;
@@ -133,26 +134,34 @@ impl<T, S> IntoGroup<Float32> for S
 }
 
 fn build_distances_group(groups: Vec<VecGroup<Float32>>, limit: GroupSize) -> VecGroup<Float32> {
+    let min_size = groups.len() / limit;
+    let reminder = groups.len() % limit;
     let mut chunks = vec![Box::new(Vec::new())]; /* FIXME: use arrays - size is known */
-    groups.into_iter().for_each(|group|
-                                if chunks.last().unwrap().len() < limit {
-                                    chunks.last_mut().unwrap().push(group)
-                                } else {
-                                    chunks.push(Box::new(vec!(group)))
-                                }
-    );
-    let grouped: Vec<VecGroup<Float32>> = chunks.into_iter().map(build_supergroup).collect();
-    match grouped.len() {
-        1 => grouped.into_iter().fold(None, |_, v| Some(v)).unwrap(), /* FIXME: fix the borrowing here */
-        _ => build_distances_group(grouped, limit)
-    }
+    groups.into_iter().enumerate().for_each(|(i, group)| {
+        let group_limit = if chunks.len() <= reminder {
+            min_size + 1
+        } else {
+            min_size
+        };
+        if chunks.last().unwrap().len() < group_limit {
+            chunks.last_mut().unwrap().push(group)
+        } else {
+            chunks.push(Box::new(vec!(group)))
+        }
+    });
+    let children = if chunks.len() < limit {
+        chunks.into_iter().map(|c| c.into_iter().fold(None, |_, g| Some(g)).unwrap()).collect()
+    } else {
+        chunks.into_iter().map(|groups| build_distances_group(*groups, limit)).collect()
+    };
+    build_supergroup(children)
 }
 
-fn build_supergroup(groups: Box<Vec<VecGroup<Float32>>>) -> VecGroup<Float32> {
+fn build_supergroup(groups: Vec<VecGroup<Float32>>) -> VecGroup<Float32> {
     let height = groups.iter().map(|g| *g.height()).fold((0.0, 0 as usize), average_folder).0;
     VecGroup {
         height: height,
-        children: Some(*groups)
+        children: Some(groups)
     }
 }
 
@@ -357,12 +366,13 @@ impl<T, W> UIElement<W> for BarWindow<T>
         let win_width = float_heights.len().min(ui_box.width as usize);
         let height = ui_box.height;
         let heights: Vec<u16> = float_heights[0..win_width].iter().map(|x| (x * (height as f32)) as u16).collect();
-        println!("got group of {} elements and height of {}", heights.len(), self.group.height());
         for i in 0..height {
             write!(screen, "{}", termion::cursor::Goto(ui_box.x, ui_box.y + (height - i)));
             write!(screen, "{}", color::Fg(color::Red));
             let filled = '*';
-            let line: String = heights.iter().map(|y| if *y < (i+1) {' '} else {filled}).collect();
+            let empty = ' ';
+            let full_heights = heights.iter().chain(iter::repeat(&0).take(win_width - (height as usize)));
+            let line: String = full_heights.map(|y| if *y < (i+1) {empty} else {filled}).collect();
             write!(screen, "{}", line);
             let selector = |x: &usize| {
                 let pos = termion::cursor::Goto(*x as u16 + ui_box.x, ui_box.y + (height - i));
