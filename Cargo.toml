@@ -6,3 +6,4 @@ authors = ["Nikita Lebedev <eazy-f@live.com>"]
 [dependencies]
 rand = "0.5"
 termion = "*"
+quick-xml = "0.12"

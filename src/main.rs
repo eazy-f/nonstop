@@ -1,9 +1,14 @@
 extern crate termion;
 extern crate rand;
 extern crate core;
+extern crate quick_xml;
+
+pub mod xml;
+pub mod segment;
 
 use std::sync::mpsc::{self, Sender, Receiver};
 use std::time::SystemTime;
+use std::env;
 
 use termion::color;
 use termion::screen::*;
@@ -11,7 +16,6 @@ use termion::event::Key;
 use termion::input::TermRead;
 use termion::raw::IntoRawMode;
 use std::string::String;
-use core::ops::Index;
 
 use std::io::{Write, stdout, stdin};
 use std::convert::From;
@@ -20,10 +24,12 @@ use std::fmt;
 use std::cmp::Ordering;
 use std::thread;
 use std::iter;
+use core::ops::Index;
+
+use segment::{Segment, Location, Position, Float32};
 
 type GroupSize = usize;
 type GroupIndex = GroupSize;
-type Float32 = f32;
 
 #[derive(Debug)]
 enum UIMessage {
@@ -71,10 +77,6 @@ impl<T: Display + PartialOrd + PartialEq> Ord for VecGroup<T> {
     }
 }
 
-trait Location: Clone + Send {
-    fn distance(a: &Self, b: &Self) -> Float32;
-}
-
 /* Collection: Index<usize, Output=Group<T>>*/
 trait Group<T: Display + PartialOrd + PartialEq>: Ord {
     type Collection: IntoIterator + Index<GroupIndex, Output=Self>;
@@ -120,15 +122,17 @@ impl<T, S> IntoGroup<Float32> for S
     type GroupType = VecGroup<Float32>;
     fn group_avg(self, groups: GroupSize) -> Self::GroupType {
         let mut last: Option<Position<T>> = None;
-        let mut distances = Vec::new();
+        let mut speed = Vec::new();
         for current in self.into_iter() {
             for prev in last.iter() {
-                distances.push(Location::distance(&prev.location, &current.location));
+                let distance = Location::distance(&prev.location, &current.location);
+                let time = current.time.duration_since(prev.time).unwrap().as_secs() as f32;
+                speed.push(distance / time);
             }
             last = Some(current);
         }
         let leaf_group = |height: &Float32| VecGroup{height: *height, children: None};
-        build_distances_group(distances.iter().map(leaf_group).collect(), groups)
+        build_distances_group(speed.iter().map(leaf_group).collect(), groups)
     }
 
 }
@@ -184,16 +188,6 @@ impl Location for u32 {
             -a
         }
     }
-}
-
-#[derive(Clone)]
-struct Position<T: Location> {
-    time: SystemTime,
-    location: T
-}
-
-trait Segment<T: Location>: Index<usize> + IntoIterator + Clone + Send {
-    fn name(&self) -> String;
 }
 
 impl<T: Location> Segment<T> for Vec<Position<T>> {
@@ -299,12 +293,12 @@ impl<T: Group<Float32>> BarWindow<T> {
     }
 
     fn key_pressed(&mut self, key: Key) {
-        let width = self.ui_box.width as usize;
+        let heights = self.calculate_heights();
+        let width = heights.len();
         let center = width / 2;
         let curent_pos = self.selected.unwrap_or(center);
         let min = 0;
-        let heights = self.calculate_heights();
-        let max = heights.len().min(width as usize) - 1;
+        let max = width - 1;
         let new_pos = match key {
             Key::Left | Key::Char('h') if curent_pos > min =>
                 Some(curent_pos - 1),
@@ -366,12 +360,13 @@ impl<T, W> UIElement<W> for BarWindow<T>
         let win_width = float_heights.len().min(ui_box.width as usize);
         let height = ui_box.height;
         let heights: Vec<u16> = float_heights[0..win_width].iter().map(|x| (x * (height as f32)) as u16).collect();
+        let len = heights.len();
         for i in 0..height {
             write!(screen, "{}", termion::cursor::Goto(ui_box.x, ui_box.y + (height - i)));
             write!(screen, "{}", color::Fg(color::Red));
             let filled = '*';
             let empty = ' ';
-            let full_heights = heights.iter().chain(iter::repeat(&0).take(win_width - (height as usize)));
+            let full_heights = heights.iter().chain(iter::repeat(&0).take((ui_box.width as usize) - len));
             let line: String = full_heights.map(|y| if *y < (i+1) {empty} else {filled}).collect();
             write!(screen, "{}", line);
             let selector = |x: &usize| {
@@ -508,9 +503,11 @@ fn whole_window() -> UIBox {
 }
 
 fn main() {
+    let args: Vec<String> = env::args().collect();
     let (tx, rx) = mpsc::channel();
     let mut screen = window_init();
-    load_test_tracks(tx);
+    /*load_test_tracks(tx);*/
+    xml::segments_from_file(&args[1], tx);
     window_run(rx, &mut screen);
 }
 
