@@ -2,12 +2,12 @@ extern crate termion;
 extern crate rand;
 extern crate core;
 extern crate quick_xml;
+extern crate chrono;
 
 pub mod xml;
 pub mod segment;
 
 use std::sync::mpsc::{self, Sender, Receiver};
-use std::time::SystemTime;
 use std::env;
 
 use termion::color;
@@ -25,6 +25,8 @@ use std::cmp::Ordering;
 use std::thread;
 use std::iter;
 use core::ops::Index;
+
+use chrono::prelude::*;
 
 use segment::{Segment, Location, Position, Float32};
 
@@ -126,7 +128,7 @@ impl<T, S> IntoGroup<Float32> for S
         for current in self.into_iter() {
             for prev in last.iter() {
                 let distance = Location::distance(&prev.location, &current.location);
-                let time = current.time.duration_since(prev.time).unwrap().as_secs() as f32;
+                let time = current.time.signed_duration_since(prev.time).num_seconds() as f32;
                 speed.push(distance / time);
             }
             last = Some(current);
@@ -210,7 +212,7 @@ fn load_test_tracks(segments: Sender<Vec<Position<u32>>>) {
     for _ in 0..size {
         let position = Position{
             location: rand::random(),
-            time: SystemTime::now()
+            time: Utc::now()
         };
         positions.push(position);
     }

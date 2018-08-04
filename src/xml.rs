@@ -4,8 +4,13 @@ use std::time::{SystemTime, Duration};
 use std::str::FromStr;
 use std::borrow::Cow;
 
+use std::thread;
+use std::time::Duration as D;
+
 use quick_xml::Reader;
 use quick_xml::events::Event;
+
+use chrono::prelude::*;
 
 use segment::{Location, Position, Float32};
 
@@ -41,7 +46,6 @@ pub fn segments_from_file(filename: &String, segments: Sender<Vec<GpxPosition>>)
     let mut location = None;
     let mut time = None;
     let mut segment = Vec::new();
-    let mut fake_time = SystemTime::now();
     loop {
         match (reader.read_event(&mut buffer), state.clone()) {
             (Ok(Event::Start(ref e)), State::Document) if e.name() == b"gpx" => {
@@ -95,16 +99,15 @@ pub fn segments_from_file(filename: &String, segments: Sender<Vec<GpxPosition>>)
             (Ok(Event::Start(ref e)), State::Point) if e.name() == b"name" => {
                 state = State::PointParam(Param::Name);
             },
-            (Ok(Event::Start(ref e)), State::Segment) if e.name() == b"time" => {
+            (Ok(Event::Start(ref e)), State::Point) if e.name() == b"time" => {
                 state = State::PointParam(Param::Time);
             },
             (Ok(Event::End(ref e)), State::PointParam(_)) => {
                 state = State::Point;
             },
-            (Ok(Event::Text(e)), State::PointParam(Time)) => {
-                let _text = e.unescape_and_decode(&reader).unwrap();
-                time = Some(fake_time);
-                fake_time = fake_time + Duration::from_secs(1);
+            (Ok(Event::Text(e)), State::PointParam(Param::Time)) => {
+                let text = e.unescape_and_decode(&reader).unwrap();
+                time = Some(text.parse::<DateTime<Utc>>().unwrap_or(Utc::now()));
             },
             (Ok(Event::Eof), _) => break,
             _ => ()

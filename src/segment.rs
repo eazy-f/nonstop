@@ -1,11 +1,13 @@
 use core::ops::Index;
 use std::time::SystemTime;
 
+use chrono::prelude::*;
+
 pub type Float32 = f32;
 
 #[derive(Clone)]
 pub struct Position<T: Location> {
-    pub time: SystemTime,
+    pub time: DateTime<Utc>,
     pub location: T
 }
 
