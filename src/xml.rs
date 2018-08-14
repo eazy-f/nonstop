@@ -1,6 +1,6 @@
 use std::sync::mpsc::Sender;
 use std::path::Path;
-use std::time::{SystemTime, Duration};
+use std::time::SystemTime;
 use std::str::FromStr;
 use std::borrow::Cow;
 

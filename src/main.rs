@@ -27,11 +27,13 @@ use std::iter;
 use core::ops::Index;
 
 use chrono::prelude::*;
+use chrono::Duration;
 
 use segment::{Segment, Location, Position, Float32};
 
 type GroupSize = usize;
 type GroupIndex = GroupSize;
+type Bounds = (Duration, Duration);
 
 #[derive(Debug)]
 enum UIMessage {
@@ -50,7 +52,18 @@ struct UIBox {
 
 struct VecGroup<T: Display + PartialOrd + PartialEq> {
     height: T,
+    duration: Duration,
     children: Option<Vec<VecGroup<T>>>
+}
+
+impl<T: Display + PartialOrd + PartialEq> VecGroup<T> {
+    fn split_at(self, split_point: Duration) -> (Option<Self>, Option<Self>) {
+        if self.duration < split_point {
+            (Some(self), None)
+        } else {
+            (None, Some(self))
+        }
+    }
 }
 
 impl<T: Display + PartialOrd + PartialEq> fmt::Display for VecGroup<T> {
@@ -128,15 +141,47 @@ impl<T, S> IntoGroup<Float32> for S
         for current in self.into_iter() {
             for prev in last.iter() {
                 let distance = Location::distance(&prev.location, &current.location);
-                let time = current.time.signed_duration_since(prev.time).num_seconds() as f32;
-                speed.push(distance / time);
+                let time = current.time.signed_duration_since(prev.time);
+                speed.push((distance / (time.num_seconds() as f32), time));
             }
             last = Some(current);
         }
-        let leaf_group = |height: &Float32| VecGroup{height: *height, children: None};
-        build_distances_group(speed.iter().map(leaf_group).collect(), groups)
+        let leaf_group = |(height, duration): (Float32, Duration)| {
+            VecGroup{height: height,
+                     duration: duration,
+                     children: None}
+        };
+        let start = Duration::seconds(0);
+        let end = speed.iter().fold(start, |acc, (_, d)| acc + *d);
+        let bounds = (start, end);
+        build_speed_group(speed.into_iter().map(leaf_group).collect(), groups, bounds)
     }
+}
 
+fn build_speed_group(groups: Vec<VecGroup<Float32>>,
+                     limit: GroupSize,
+                     bounds: Bounds) -> VecGroup<Float32>
+{
+    if groups.len() == 1 {
+        groups.into_iter().last().unwrap()
+    } else {
+        let subgroup_size = (bounds.1 - bounds.0) / (limit as i32);
+        let boundary = (bounds.0, bounds.0 + subgroup_size);
+        let mut splitted = vec![(boundary, Box::new(Vec::new()))];
+        for group in groups {
+            let last_boundary = splitted.last().unwrap().0;
+            let (left, right) = group.split_at(last_boundary.0);
+            left.map(|left_group| splitted.last_mut().unwrap().1.push(left_group));
+            right.map(|right_group| {
+                let new_bondary = (boundary.1, boundary.1 + subgroup_size);
+                splitted.push((new_bondary, Box::new(vec![right_group])));
+            });
+        }
+        let children = splitted.into_iter().map(|(boundary, subgroups)| {
+            build_speed_group(*subgroups, limit, boundary)
+        }).collect();
+        build_supergroup(children, bounds.1 - bounds.0)
+    }
 }
 
 fn build_distances_group(groups: Vec<VecGroup<Float32>>, limit: GroupSize) -> VecGroup<Float32> {
@@ -152,7 +197,7 @@ fn build_distances_group(groups: Vec<VecGroup<Float32>>, limit: GroupSize) -> Ve
         if chunks.last().unwrap().len() < group_limit {
             chunks.last_mut().unwrap().push(group)
         } else {
-            chunks.push(Box::new(vec!(group)))
+            chunks.push(Box::new(vec![group]))
         }
     });
     let children = if chunks.len() < limit {
@@ -160,13 +205,16 @@ fn build_distances_group(groups: Vec<VecGroup<Float32>>, limit: GroupSize) -> Ve
     } else {
         chunks.into_iter().map(|groups| build_distances_group(*groups, limit)).collect()
     };
-    build_supergroup(children)
+    build_supergroup(children, Duration::seconds(0))
 }
 
-fn build_supergroup(groups: Vec<VecGroup<Float32>>) -> VecGroup<Float32> {
+fn build_supergroup(groups: Vec<VecGroup<Float32>>, duration: Duration) ->
+    VecGroup<Float32>
+{
     let height = groups.iter().map(|g| *g.height()).fold((0.0, 0 as usize), average_folder).0;
     VecGroup {
         height: height,
+        duration: duration,
         children: Some(groups)
     }
 }
