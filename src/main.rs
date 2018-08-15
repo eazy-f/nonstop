@@ -142,7 +142,7 @@ impl<T, S> IntoGroup<Float32> for S
             for prev in last.iter() {
                 let distance = Location::distance(&prev.location, &current.location);
                 let time = current.time.signed_duration_since(prev.time);
-                speed.push((distance / (time.num_seconds() as f32), time));
+                speed.push((distance * 3.6 / (time.num_seconds() as f32), time));
             }
             last = Some(current);
         }
@@ -348,7 +348,7 @@ impl<T: Group<Float32>> BarWindow<T> {
     }
 
     fn key_pressed(&mut self, key: Key) {
-        let heights = self.calculate_heights();
+        let heights = calculate_heights(self.selected_group());
         let width = heights.len();
         let center = width / 2;
         let curent_pos = self.selected.unwrap_or(center);
@@ -381,14 +381,22 @@ impl<T: Group<Float32>> BarWindow<T> {
         self.levels.pop()
     }
 
-    fn calculate_heights(&self) -> Vec<Float32> {
-        let group = self.levels.iter().fold(&self.group, group_level_walker);
-        let max = group.iter().max().unwrap().height();
-        let normalize = |x: &T| -> Float32 {
-            (x.height() / max).max(0.0).min(1.0)
-        };
-        group.iter().map(normalize).collect()
+    fn selected_group(&self) -> &T {
+        self.levels.iter().fold(&self.group, group_level_walker)
     }
+
+}
+
+fn calculate_heights<T: Group<Float32>>(group: &T) -> Vec<Float32> {
+    let max = max_height(group);
+    let normalize = |x: &T| -> Float32 {
+        (x.height() / max).max(0.0).min(1.0)
+    };
+    group.iter().map(normalize).collect()
+}
+
+fn max_height<T: Group<Float32>>(group: &T) -> Float32 {
+    group.iter().max().unwrap().height().clone()
 }
 
 fn group_level_walker<'a, T>(group: &'a T, i: &GroupIndex) -> &'a T
@@ -411,27 +419,33 @@ impl<T, W> UIElement<W> for BarWindow<T>
 {
     fn draw(&self, screen: &mut AlternateScreen<W>) {
         let ui_box = &self.ui_box;
-        let float_heights = self.calculate_heights();
+        let group = self.selected_group();
+        let float_heights = calculate_heights(group);
+        let max_height = max_height(group).to_string();
+        let legend_width = max_height.len() as u16;
+        let graph_base = UIBox {x: ui_box.x + legend_width, ..*ui_box};
         let win_width = float_heights.len().min(ui_box.width as usize);
         let height = ui_box.height;
         let heights: Vec<u16> = float_heights[0..win_width].iter().map(|x| (x * (height as f32)) as u16).collect();
         let len = heights.len();
         for i in 0..height {
-            write!(screen, "{}", termion::cursor::Goto(ui_box.x, ui_box.y + (height - i)));
+            write!(screen, "{}", termion::cursor::Goto(graph_base.x, graph_base.y + (height - i - 1)));
             write!(screen, "{}", color::Fg(color::Red));
             let filled = '*';
             let empty = ' ';
-            let full_heights = heights.iter().chain(iter::repeat(&0).take((ui_box.width as usize) - len));
+            let full_heights = heights.iter().chain(iter::repeat(&0).take((graph_base.width as usize) - len));
             let line: String = full_heights.map(|y| if *y < (i+1) {empty} else {filled}).collect();
             write!(screen, "{}", line);
             let selector = |x: &usize| {
-                let pos = termion::cursor::Goto(*x as u16 + ui_box.x, ui_box.y + (height - i));
+                let pos = termion::cursor::Goto(*x as u16 + graph_base.x, graph_base.y + (height - i - 1));
                 if heights[*x] > i {
                     write!(screen, "{}{}{}", pos, color::Fg(color::Blue), filled);
                 }
             };
             self.selected.iter().for_each(selector);
         }
+        write!(screen, "{}", termion::cursor::Goto(ui_box.x, ui_box.y));
+        write!(screen, "{}", max_height);
     }
 
     fn update<'b>(&mut self, message: &UIMessage, _beacon: &'b u32) -> Option<Box<UIElement<W> + 'b>> {

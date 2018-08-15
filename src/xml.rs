@@ -24,7 +24,14 @@ impl Location for GpxLocation {
     fn distance(a: &Self, b: &Self) -> Float32 {
         let lat_diff = b.lat - a.lat;
         let lon_diff = b.lon - a.lon;
-        (lat_diff*lat_diff + lon_diff*lon_diff).sqrt()
+        let earth = 6371000.0;
+        let d_lat = (b.lat - a.lat).to_radians();
+        let d_lon = (b.lon - a.lon).to_radians();
+        let lat1 = a.lat.to_radians();
+        let lat2 = b.lat.to_radians();
+        let a = ((d_lat/2.0).sin()) * ((d_lat/2.0).sin()) + ((d_lon/2.0).sin()) * ((d_lon/2.0).sin()) * (lat1.cos()) * (lat2.cos());
+        let c = 2.0 * ((a.sqrt()).atan2((1.0-a).sqrt()));
+        earth * c
     }
 }
 
