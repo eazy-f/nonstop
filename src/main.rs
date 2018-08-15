@@ -152,35 +152,40 @@ impl<T, S> IntoGroup<Float32> for S
                      children: None}
         };
         let start = Duration::seconds(0);
-        let end = speed.iter().fold(start, |acc, (_, d)| acc + *d);
-        let bounds = (start, end);
-        build_speed_group(speed.into_iter().map(leaf_group).collect(), groups, bounds)
+        let span = speed.iter().fold(start, |acc, (_, d)| acc + *d);
+        build_speed_group(speed.into_iter().map(leaf_group).collect(), groups, span)
     }
 }
 
 fn build_speed_group(groups: Vec<VecGroup<Float32>>,
                      limit: GroupSize,
-                     bounds: Bounds) -> VecGroup<Float32>
+                     span: Duration) -> VecGroup<Float32>
 {
     if groups.len() == 1 {
         groups.into_iter().last().unwrap()
     } else {
-        let subgroup_size = (bounds.1 - bounds.0) / (limit as i32);
-        let boundary = (bounds.0, bounds.0 + subgroup_size);
-        let mut splitted = vec![(boundary, Box::new(Vec::new()))];
+        let subgroup_span = span / (limit as i32);
+        let mut splitted = vec![Box::new(Vec::new())];
+        let mut work_span = subgroup_span;
         for group in groups {
-            let last_boundary = splitted.last().unwrap().0;
-            let (left, right) = group.split_at(last_boundary.0);
-            left.map(|left_group| splitted.last_mut().unwrap().1.push(left_group));
+            let (left, right) = group.split_at(work_span);
+            left.map(|left_group| {
+                work_span = work_span - left_group.duration;
+                splitted.last_mut().unwrap().push(left_group)
+            });
             right.map(|right_group| {
-                let new_bondary = (boundary.1, boundary.1 + subgroup_size);
-                splitted.push((new_bondary, Box::new(vec![right_group])));
+                splitted.push(Box::new(vec![right_group]));
+                work_span = subgroup_span;
             });
         }
-        let children = splitted.into_iter().map(|(boundary, subgroups)| {
-            build_speed_group(*subgroups, limit, boundary)
+        let children = splitted.into_iter().filter_map(|subgroups| {
+            if subgroups.len() > 0 {
+                Some(build_speed_group(*subgroups, limit, subgroup_span))
+            } else {
+                None
+            }
         }).collect();
-        build_supergroup(children, bounds.1 - bounds.0)
+        build_supergroup(children, span)
     }
 }
 
