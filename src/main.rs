@@ -97,6 +97,7 @@ trait Group<T: Display + PartialOrd + PartialEq>: Ord {
     type Collection: IntoIterator + Index<GroupIndex, Output=Self>;
     /*type ChildrenIter: Iterator;*/
     fn height(&self) -> &T;
+    fn duration(&self) -> &Duration;
     fn children(&self) -> Option<&Self::Collection>;
     fn len(self) -> GroupSize;
     /* FIXME: no need for a trait object */
@@ -108,6 +109,9 @@ impl<T: Display + PartialOrd + PartialEq> Group<T> for VecGroup<T> {
     /*type ChildrenIter = Iter<'a, VecGroup<T>>;*/
     fn height(&self) -> &T {
         &self.height
+    }
+    fn duration(&self) -> &Duration {
+        &self.duration
     }
     fn children(&self) -> Option<&Self::Collection> {
         self.children.as_ref()
@@ -384,7 +388,6 @@ impl<T: Group<Float32>> BarWindow<T> {
     fn selected_group(&self) -> &T {
         self.levels.iter().fold(&self.group, group_level_walker)
     }
-
 }
 
 fn calculate_heights<T: Group<Float32>>(group: &T) -> Vec<Float32> {
@@ -423,29 +426,29 @@ impl<T, W> UIElement<W> for BarWindow<T>
         let float_heights = calculate_heights(group);
         let max_height = max_height(group).to_string();
         let legend_width = max_height.len() as u16;
-        let graph_base = UIBox {x: ui_box.x + legend_width, ..*ui_box};
+        let graph_box = UIBox {y: ui_box.y + 1, height: ui_box.height - 2, ..*ui_box};
         let win_width = float_heights.len().min(ui_box.width as usize);
-        let height = ui_box.height;
+        let height = graph_box.height;
         let heights: Vec<u16> = float_heights[0..win_width].iter().map(|x| (x * (height as f32)) as u16).collect();
         let len = heights.len();
         for i in 0..height {
-            write!(screen, "{}", termion::cursor::Goto(graph_base.x, graph_base.y + (height - i - 1)));
+            write!(screen, "{}", termion::cursor::Goto(graph_box.x, graph_box.y + (height - i - 1)));
             write!(screen, "{}", color::Fg(color::Red));
             let filled = '*';
             let empty = ' ';
-            let full_heights = heights.iter().chain(iter::repeat(&0).take((graph_base.width as usize) - len));
+            let full_heights = heights.iter().chain(iter::repeat(&0).take((graph_box.width as usize) - len));
             let line: String = full_heights.map(|y| if *y < (i+1) {empty} else {filled}).collect();
             write!(screen, "{}", line);
             let selector = |x: &usize| {
-                let pos = termion::cursor::Goto(*x as u16 + graph_base.x, graph_base.y + (height - i - 1));
+                let pos = termion::cursor::Goto(*x as u16 + graph_box.x, graph_box.y + (height - i - 1));
                 if heights[*x] > i {
                     write!(screen, "{}{}{}", pos, color::Fg(color::Blue), filled);
                 }
             };
             self.selected.iter().for_each(selector);
         }
-        write!(screen, "{}", termion::cursor::Goto(ui_box.x, ui_box.y));
-        write!(screen, "{}", max_height);
+        draw_time(screen, ui_box, &group.duration());
+        self.selected.iter().for_each(|pos| draw_speed(screen, &ui_box, pos, group.children().unwrap()[*pos].height()));
     }
 
     fn update<'b>(&mut self, message: &UIMessage, _beacon: &'b u32) -> Option<Box<UIElement<W> + 'b>> {
@@ -461,6 +464,34 @@ impl<T, W> UIElement<W> for BarWindow<T>
         };
         None
     }
+}
+
+fn draw_time<W: Write>(screen: &mut AlternateScreen<W>, ui_box: &UIBox, time: &Duration) {
+    let seconds_total = time.num_seconds();
+    let seconds = seconds_total % 60;
+    let minutes = (seconds_total / 60) % 60;
+    let hours = (seconds_total / 60 * 60) % 60;
+    let displayed = format!("{}:{:02}:{:02}", hours, minutes, seconds);
+    let start_x = ui_box.x + (ui_box.width - displayed.len() as u16) / 2;
+    let first_line = ui_box.y;
+    write!(screen, "{}", termion::cursor::Goto(start_x, first_line));
+    write!(screen, "{}", color::Fg(color::Yellow));
+    write!(screen, "{}", displayed);
+}
+
+fn draw_speed<W: Write>(screen: &mut AlternateScreen<W>, ui_box: &UIBox, pos: &GroupIndex, speed: &Float32) {
+    let displayed = format!("{}", speed);
+    let last_line = ui_box.y + ui_box.height - 1;
+    let displayed_len = displayed.len() as u16;
+    let left_len = displayed_len / 2;
+    let right_border = ui_box.width - 1 - displayed_len;
+    let left_shift = ((*pos as i32 - (left_len as i32)).max(0) as u16).min(right_border);
+    let space = ' ';
+    let left_pad: String = iter::repeat(space).take(left_shift as usize).collect();
+    let right_pad: String = iter::repeat(space).take((ui_box.width - (left_shift + displayed_len)) as usize).collect();
+    write!(screen, "{}", termion::cursor::Goto(ui_box.x, last_line));
+    write!(screen, "{}", color::Fg(color::Blue));
+    write!(screen, "{}{}{}", left_pad, displayed, right_pad);
 }
 
 impl<'a> ElementQuit<'a> {
