@@ -335,7 +335,8 @@ struct ElementSegmentSelector<'a, T, L, W>
     segments: Receiver<T>,
     disconnected: bool,
     data_source_id: u32,
-    type_trick: Option<W>
+    type_trick: Option<W>,
+    selected: Option<usize>
 }
 
 impl<T: Group<Float32>> BarWindow<T> {
@@ -531,7 +532,8 @@ impl<'a, T, L, W> ElementSegmentSelector<'a, T, L, W>
             segments: segments_rx,
             disconnected: false,
             data_source_id: data_source_id,
-            type_trick: None
+            type_trick: None,
+            selected: None
         }
     }
 
@@ -554,8 +556,16 @@ impl<'a, T, L, W> ElementSegmentSelector<'a, T, L, W>
                 self.ui_events.send(UIMessage::UIQuit);
                 None
             },
-            (true, 1) => Some(Box::new(state_segment_edit(self.available_segments[0].clone(), self.ui_events))),
-            _ => {
+            (true, 1) => {
+                /* FIXME: should be move probably */
+                let segment = self.available_segments[0].clone();
+                let graph_element = state_segment_edit(segment, self.ui_events);
+                Some(Box::new(graph_element))
+            },
+            (_, n) => {
+                if n > 0 && self.selected.is_none() {
+                    self.selected = Some(0);
+                }
                 self.ui_events.send(UIMessage::UIUpdate);
                 None
             }
@@ -566,9 +576,30 @@ impl<'a, T, L, W> ElementSegmentSelector<'a, T, L, W>
 impl<'a, T, L, W> UIElement<W> for ElementSegmentSelector<'a, T, L, W>
     where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>> + 'static, W: Write
 {
+    fn draw(&self, screen: &mut AlternateScreen<W>) {
+        let ui_box = &self.ui_box;
+        for (i, segment) in self.available_segments.iter().enumerate() {
+            let line = ui_box.y + (i as u16);
+            write!(screen, "{}", termion::cursor::Goto(ui_box.x, line));
+            write!(screen, "{}", color::Fg(color::Blue));
+            let selector = match self.selected {
+                Some(pos) if pos == i => ">",
+                _ => " "
+            };
+            write!(screen, "{} {}", selector, segment.name());
+        }
+    }
+
     fn update<'b>(&mut self, message: &UIMessage, _beacon: &'b u32) -> Option<Box<UIElement<W> + 'b>> {
         match message {
             UIMessage::UIDataSourceUpdate(id) if *id == self.data_source_id => self.data_source_update(),
+            UIMessage::UIKeyPress(Key::Char('\n')) => {
+                self.selected.map(|pos| {
+                    self.selected = None;
+                    let segment = self.available_segments[pos].clone();
+                    Box::new(state_segment_edit(segment, self.ui_events)) as Box<UIElement<W>>
+                })
+            },
             _ => None
         }
     }
