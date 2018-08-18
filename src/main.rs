@@ -251,7 +251,8 @@ impl Location for u32 {
 
 impl<T: Location> Segment<T> for Vec<Position<T>> {
     fn name(&self) -> String {
-        String::from("no name")
+        let name = |pos: &Position<T>| format!("{} {} points", pos.time, self.len());
+        self.get(0).map_or(String::from("empty segment"), name)
     }
 }
 
