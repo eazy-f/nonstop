@@ -145,8 +145,9 @@ impl<T, S> IntoGroup<Float32> for S
         for current in self.into_iter() {
             for prev in last.iter() {
                 let distance = Location::distance(&prev.location, &current.location);
-                let time = current.time.signed_duration_since(prev.time);
-                speed.push((distance * 3.6 / (time.num_seconds() as f32), time));
+                /* FIXME: dirty workaround for negative time */
+                let time = current.time.signed_duration_since(prev.time).max(Duration::milliseconds(1));
+                speed.push((distance * 3600.0 / (time.num_milliseconds() as f32), time));
             }
             last = Some(current);
         }
@@ -472,7 +473,7 @@ fn draw_time<W: Write>(screen: &mut AlternateScreen<W>, ui_box: &UIBox, time: &D
     let seconds_total = time.num_seconds();
     let seconds = seconds_total % 60;
     let minutes = (seconds_total / 60) % 60;
-    let hours = (seconds_total / 60 * 60) % 60;
+    let hours = seconds_total / (60 * 60);
     let displayed = format!("{}:{:02}:{:02}", hours, minutes, seconds);
     let start_x = ui_box.x + (ui_box.width - displayed.len() as u16) / 2;
     let first_line = ui_box.y;
