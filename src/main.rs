@@ -651,7 +651,7 @@ fn main() {
     let (tx, rx) = mpsc::channel();
     let mut screen = window_init();
     /*load_test_tracks(tx);*/
-    xml::segments_from_file(&args[1], tx);
+    let _loader = thread::spawn(move || xml::segments_from_file(&args[1], tx));
     window_run(rx, &mut screen);
 }
 
