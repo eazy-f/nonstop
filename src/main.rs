@@ -600,6 +600,18 @@ impl<'a, T, L, W> UIElement<W> for ElementSegmentSelector<'a, T, L, W>
                     Box::new(state_segment_edit(segment, self.ui_events)) as Box<UIElement<W>>
                 })
             },
+            UIMessage::UIKeyPress(Key::Char(c)) if *c == 'j' || *c == 'k' => {
+                let change = match *c {
+                    'j' => 1,
+                    _ => -1
+                };
+                let cap = (self.available_segments.len() - 1) as i32;
+                self.selected = self.selected.map(|pos| {
+                    self.ui_events.send(UIMessage::UIUpdate);
+                    (pos as i32 + change).max(0).min(cap) as usize
+                });
+                None
+            },
             _ => None
         }
     }
