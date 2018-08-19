@@ -221,11 +221,8 @@ fn build_distances_group(groups: Vec<VecGroup<Float32>>, limit: GroupSize) -> Ve
 fn build_supergroup(groups: Vec<VecGroup<Float32>>) ->
     VecGroup<Float32>
 {
-    let zero = Duration::seconds(0);
-    let ((height, _), duration) = groups.iter().fold(((0.0, 0 as usize), zero), |acc, group| {
-        let (height_acc, duration_acc) = acc;
-        (average_folder(height_acc, *group.height()), duration_acc + *group.duration())
-    });
+    let zero = (0.0, Duration::seconds(0));
+    let (height, duration) = groups.iter().map(|g| (*g.height(), *g.duration())).fold(zero, average_folder);
     VecGroup {
         height: height,
         duration: duration,
@@ -236,11 +233,13 @@ fn build_supergroup(groups: Vec<VecGroup<Float32>>) ->
 
 /*fn average_folder<T>((current, count): (T, usize), sample: T) -> (T, usize)
     where T: Div<Output=T> + Add + Mul + From<usize> {*/
-fn average_folder((current, count): (Float32, usize), sample: Float32)
-                  -> (Float32, usize) {
-    let new_count = count + 1;
-    let avg = (f32::from(count as u16)*current + sample) / f32::from(new_count as u16);
-    (avg, new_count)
+fn average_folder((current, duration): (Float32, Duration),
+                  (sample, sample_duration): (Float32, Duration))
+                  -> (Float32, Duration) {
+    let new_duration = duration + sample_duration;
+    let milli = |duration: Duration| duration.num_milliseconds() as f32;
+    let avg = (milli(duration) * current + milli(sample_duration) * sample) / milli(new_duration);
+    (avg, new_duration)
 }
 
 impl Location for u32 {
@@ -665,7 +664,10 @@ mod tests {
     use super::*;
     #[test]
     fn average() {
-        let values = vec![-2.5, 1.0, 4.5];
-        assert_eq!(values.into_iter().fold((0.0, 0 as usize), average_folder), (1.0, 3));
+        let values = vec![(1.0, Duration::seconds(6)),
+                          (2.0, Duration::seconds(1)),
+                          (4.0, Duration::seconds(1))];
+        assert_eq!(values.into_iter().fold((0.0, Duration::seconds(0)), average_folder),
+                   (1.5, Duration::seconds(8)));
     }
 }
