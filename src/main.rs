@@ -190,7 +190,7 @@ fn build_speed_group(groups: Vec<VecGroup<Float32>>,
                 None
             }
         }).collect();
-        build_supergroup(children, span)
+        build_supergroup(children)
     }
 }
 
@@ -215,13 +215,17 @@ fn build_distances_group(groups: Vec<VecGroup<Float32>>, limit: GroupSize) -> Ve
     } else {
         chunks.into_iter().map(|groups| build_distances_group(*groups, limit)).collect()
     };
-    build_supergroup(children, Duration::seconds(0))
+    build_supergroup(children)
 }
 
-fn build_supergroup(groups: Vec<VecGroup<Float32>>, duration: Duration) ->
+fn build_supergroup(groups: Vec<VecGroup<Float32>>) ->
     VecGroup<Float32>
 {
-    let height = groups.iter().map(|g| *g.height()).fold((0.0, 0 as usize), average_folder).0;
+    let zero = Duration::seconds(0);
+    let ((height, _), duration) = groups.iter().fold(((0.0, 0 as usize), zero), |acc, group| {
+        let (height_acc, duration_acc) = acc;
+        (average_folder(height_acc, *group.height()), duration_acc + *group.duration())
+    });
     VecGroup {
         height: height,
         duration: duration,
