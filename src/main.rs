@@ -313,18 +313,49 @@ fn window_run<L, T, W>(segments: Receiver<T>, screen: &mut AlternateScreen<W>)
     }
 }
 
+trait Cutter {
+    fn mark(&mut self, selected: Vec<GroupIndex>);
+    fn is_cut(&self, candidate: &Vec<GroupIndex>) -> bool;
+}
+
+struct FatalityCutter {
+    limits: Option<(Vec<GroupIndex>, Option<Vec<GroupIndex>>)>
+}
+
+impl FatalityCutter {
+    fn new() -> FatalityCutter {
+        FatalityCutter {limits: None}
+    }
+}
+
+impl Cutter for FatalityCutter {
+    fn mark(&mut self, selected: Vec<GroupIndex>) {
+        self.limits = match self.limits {
+            Some((ref left, None)) => Some((left.clone(), Some(selected))),
+            _ => Some((selected, None))
+        }
+    }
+    fn is_cut(&self, candidate: &Vec<GroupIndex>) -> bool {
+        match self.limits {
+            Some((ref left, Some(ref right))) if candidate >= left && candidate <= right => true,
+            _ => false
+        }
+    }
+}
+
 trait UIElement<W: Write> {
     fn draw(&self, screen: &mut AlternateScreen<W>) {}
     fn update<'a>(&mut self, message: &UIMessage, beacon: &'a u32) -> Option<Box<UIElement<W> + 'a>> {None}
 }
 
-struct BarWindow<T: Group<Float32>> {
+struct BarWindow<T: Group<Float32>, C: Cutter> {
     heights: Option<Vec<f32>>,
     ui_box: UIBox,
     ui_events: Sender<UIMessage>,
     selected: Option<GroupSize>,
     levels: Vec<GroupIndex>,
-    group: T
+    group: T,
+    cutter: C
 }
 
 struct ElementQuit<'a> {
@@ -344,16 +375,17 @@ struct ElementSegmentSelector<'a, T, L, W>
     selected: Option<usize>
 }
 
-impl<T: Group<Float32>> BarWindow<T> {
-    fn new(group: T, ui_events: Sender<UIMessage>, ui_box: UIBox) -> BarWindow<T>
+impl<T: Group<Float32>, C: Cutter> BarWindow<T, C> {
+    fn new(group: T, ui_events: Sender<UIMessage>, ui_box: UIBox, cutter: C) -> BarWindow<T, C>
     {
-        BarWindow{
+        BarWindow {
             heights: None,
             ui_box: ui_box,
             ui_events: ui_events,
             selected: None,
             group: group,
-            levels: Vec::new()
+            levels: Vec::new(),
+            cutter: cutter
         }
     }
 
@@ -364,6 +396,13 @@ impl<T: Group<Float32>> BarWindow<T> {
         let curent_pos = self.selected.unwrap_or(center);
         let min = 0;
         let max = width - 1;
+        if key == Key::Char(' ') {
+            self.selected.map(|group| {
+                let mut levels = self.levels.clone();
+                levels.push(group);
+                self.cutter.mark(levels)
+            });
+        }
         let new_pos = match key {
             Key::Left | Key::Char('h') if curent_pos > min =>
                 Some(curent_pos - 1),
@@ -422,9 +461,15 @@ fn group_level_walker<'a, T>(group: &'a T, i: &GroupIndex) -> &'a T
     group.children().map_or(group, go_deeper)
 }
 
+#[derive(PartialEq, Clone, Copy)]
+enum BarColors {
+    Normal,
+    Pointer,
+    Selected
+}
 
-impl<T, W> UIElement<W> for BarWindow<T>
-    where W: Write, T: Group<Float32>
+impl<T, W, C> UIElement<W> for BarWindow<T, C>
+    where W: Write, T: Group<Float32>, C: Cutter
 {
     fn draw(&self, screen: &mut AlternateScreen<W>) {
         let ui_box = &self.ui_box;
@@ -433,25 +478,41 @@ impl<T, W> UIElement<W> for BarWindow<T>
         let max_height = max_height(group).to_string();
         let legend_width = max_height.len() as u16;
         let graph_box = UIBox {y: ui_box.y + 1, height: ui_box.height - 2, ..*ui_box};
-        let win_width = float_heights.len().min(ui_box.width as usize);
+        let bars = float_heights.len().min(ui_box.width as usize);
         let height = graph_box.height;
-        let heights: Vec<u16> = float_heights[0..win_width].iter().map(|x| (x * (height as f32)) as u16).collect();
+        let heights: Vec<u16> = float_heights[0..bars].iter().map(|x| (x * (height as f32)) as u16).collect();
         let len = heights.len();
-        for i in 0..height {
-            write!(screen, "{}", termion::cursor::Goto(graph_box.x, graph_box.y + (height - i - 1)));
-            write!(screen, "{}", color::Fg(color::Red));
+        let mut levels = self.levels.clone();
+        levels.push(0);
+        for (i, bar_height) in heights.iter().enumerate() {
+            let mut active_color = None;
             let filled = '*';
             let empty = ' ';
-            let full_heights = heights.iter().chain(iter::repeat(&0).take((graph_box.width as usize) - len));
-            let line: String = full_heights.map(|y| if *y < (i+1) {empty} else {filled}).collect();
-            write!(screen, "{}", line);
-            let selector = |x: &usize| {
-                let pos = termion::cursor::Goto(*x as u16 + graph_box.x, graph_box.y + (height - i - 1));
-                if heights[*x] > i {
-                    write!(screen, "{}{}{}", pos, color::Fg(color::Blue), filled);
+            levels[self.levels.len()] = i;
+            for j in 0..height {
+                let pos = termion::cursor::Goto(graph_box.x + i as u16, graph_box.y + (height - (j as u16) - 1));
+                write!(screen, "{}", pos);
+                let color = match (self.selected, self.cutter.is_cut(&levels)) {
+                    (Some(bar), _) if bar == i => BarColors::Pointer,
+                    (_, true) => BarColors::Selected,
+                    _ => BarColors::Normal
+                };
+                if active_color != Some(color) {
+                    /* FIXME: try solving with macro */
+                    match color {
+                        BarColors::Normal   => write!(screen, "{}", color::Fg(color::Green)),
+                        BarColors::Pointer  => write!(screen, "{}", color::Fg(color::Blue)),
+                        BarColors::Selected => write!(screen, "{}", color::Fg(color::Red))
+                    };
+                    active_color = Some(color);
                 }
-            };
-            self.selected.iter().for_each(selector);
+                let sym = if j < *bar_height {
+                    filled
+                } else {
+                    empty
+                };
+                write!(screen, "{}", sym);
+            }
         }
         draw_time(screen, ui_box, &group.duration());
         self.selected.iter().for_each(|pos| draw_speed(screen, &ui_box, pos, group.children().unwrap()[*pos].height()));
@@ -463,6 +524,7 @@ impl<T, W> UIElement<W> for BarWindow<T>
                 if *key == Key::Left
                 || *key == Key::Right
                 || *key == Key::Char('\n')
+                || *key == Key::Char(' ')
                 || *key == Key::Char('u')
                 || *key == Key::Char('h')
                 || *key == Key::Char('l') => self.key_pressed(*key),
@@ -543,6 +605,7 @@ impl<'a, T, L, W> ElementSegmentSelector<'a, T, L, W>
     }
 
     fn data_source_update(&mut self) -> Option<Box<UIElement<W>>> {
+        let start_len = self.available_segments.len();
         loop {
             match self.segments.try_recv() {
                 Err(err) => {
@@ -568,7 +631,7 @@ impl<'a, T, L, W> ElementSegmentSelector<'a, T, L, W>
                 Some(Box::new(graph_element))
             },
             (_, n) => {
-                if n > 0 && self.selected.is_none() {
+                if n > 0 && self.selected.is_none() && start_len == 0 {
                     self.selected = Some(0);
                 }
                 self.ui_events.send(UIMessage::UIUpdate);
@@ -631,12 +694,14 @@ fn dispatch_segments<L, T>(from: Receiver<T>, to: Sender<T>, ui_events: Sender<U
     }
 }
 
-fn state_segment_edit<L, T>(segment: T, ui_events: &Sender<UIMessage>) -> BarWindow<T::GroupType>
+fn state_segment_edit<L, T>(segment: T, ui_events: &Sender<UIMessage>) ->
+    BarWindow<T::GroupType, FatalityCutter>
     where L: Location,
           T: Segment<L, Item=Position<L>, Output=Position<L>> + IntoGroup<Float32>,
 {
     let group = segment.group_avg(40 as GroupSize);
-    BarWindow::new(group, ui_events.clone(), whole_window())
+    let cutter = FatalityCutter::new();
+    BarWindow::new(group, ui_events.clone(), whole_window(), cutter)
 }
 
 fn initial_ui_elements<'a, L, T, W>(ui_events: &'a Sender<UIMessage>, segments: Receiver<T>) -> Vec<Box<UIElement<W> + 'a>>
