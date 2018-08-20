@@ -331,13 +331,24 @@ impl FatalityCutter {
 impl Cutter for FatalityCutter {
     fn mark(&mut self, selected: Vec<GroupIndex>) {
         self.limits = match self.limits {
-            Some((ref left, None)) => Some((left.clone(), Some(selected))),
+            Some((ref left, None)) if left < &selected => {
+                let mut right = selected.clone();
+                let last = right.len() - 1;
+                right[last] += 1;
+                Some((left.clone(), Some(right)))
+            },
+            Some((ref left, None)) if left >= &selected => {
+                let mut right = left.clone();
+                let last = right.len() - 1;
+                right[last] += 1;
+                Some((selected, Some(right)))
+            },
             _ => Some((selected, None))
         }
     }
     fn is_cut(&self, candidate: &Vec<GroupIndex>) -> bool {
         match self.limits {
-            Some((ref left, Some(ref right))) if candidate >= left && candidate <= right => true,
+            Some((ref left, Some(ref right))) if candidate >= left && candidate < right => true,
             _ => false
         }
     }
