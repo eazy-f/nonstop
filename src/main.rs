@@ -131,16 +131,17 @@ impl<T: Display + PartialOrd + PartialEq> Group<T> for VecGroup<T> {
 
 trait IntoGroup<T: Display + PartialOrd + PartialEq> {
     type GroupType: Group<T>;
-    fn group_avg(self, groups: GroupSize) -> Self::GroupType;
+    fn group_avg(&self, groups: GroupSize) -> Self::GroupType;
 }
 
 impl<T, S> IntoGroup<Float32> for S
     where T: Location,
-          S: Segment<T, Item=Position<T>, Output=Position<T>>
+          S: Segment<T, Item=Position<T>, Output=Position<T>>,
+          for<'a> &'a S: IntoIterator<Item = &'a Position<T>>
 {
     type GroupType = VecGroup<Float32>;
-    fn group_avg(self, groups: GroupSize) -> Self::GroupType {
-        let mut last: Option<Position<T>> = None;
+    fn group_avg(&self, groups: GroupSize) -> Self::GroupType {
+        let mut last: Option<&Position<T>> = None;
         let mut speed = Vec::new();
         for current in self.into_iter() {
             for prev in last.iter() {
@@ -287,7 +288,9 @@ fn show_segment<W: Write, L: Location, T: Segment<L>>(screen: &mut AlternateScre
 }
 
 fn window_run<L, T, W>(segments: Receiver<T>, screen: &mut AlternateScreen<W>)
-    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>> + 'static, W: Write
+    where L: Location,
+          T: Segment<L, Item=Position<L>, Output=Position<L>> + IntoGroup<Float32> + 'static,
+          W: Write
 {
     let (ui_tx, ui_rx) = mpsc::channel();
     let beacon = 12; /* FIXME: such an ugly hack */
@@ -495,7 +498,7 @@ impl<T, W, C> UIElement<W> for BarWindow<T, C>
         let len = heights.len();
         let mut levels = self.levels.clone();
         levels.push(0);
-        for (i, bar_height) in heights.iter().enumerate() {
+        for i in 0..(ui_box.width as usize) {
             let mut active_color = None;
             let filled = '*';
             let empty = ' ';
@@ -517,7 +520,7 @@ impl<T, W, C> UIElement<W> for BarWindow<T, C>
                     };
                     active_color = Some(color);
                 }
-                let sym = if j < *bar_height {
+                let sym = if i < heights.len() && j < heights[i] {
                     filled
                 } else {
                     empty
@@ -596,7 +599,9 @@ impl<'a, W: Write> UIElement<W> for ElementQuit<'a> {
 }
 
 impl<'a, T, L, W> ElementSegmentSelector<'a, T, L, W>
-    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>> + 'static, W: Write
+    where L: Location,
+          T: Segment<L, Item=Position<L>, Output=Position<L>> + IntoGroup<Float32> + 'static,
+          W: Write
 {
     fn new(segments: Receiver<T>, ui_events: &'a Sender<UIMessage>, ui_box: UIBox) -> ElementSegmentSelector<'a, T, L, W> {
         let (segments_tx, segments_rx) = mpsc::channel();
@@ -636,8 +641,7 @@ impl<'a, T, L, W> ElementSegmentSelector<'a, T, L, W>
                 None
             },
             (true, 1) => {
-                /* FIXME: should be move probably */
-                let segment = self.available_segments[0].clone();
+                let segment = &self.available_segments[0];
                 let graph_element = state_segment_edit(segment, self.ui_events);
                 Some(Box::new(graph_element))
             },
@@ -653,7 +657,9 @@ impl<'a, T, L, W> ElementSegmentSelector<'a, T, L, W>
 }
 
 impl<'a, T, L, W> UIElement<W> for ElementSegmentSelector<'a, T, L, W>
-    where L: Location, T: Segment<L, Item=Position<L>, Output=Position<L>> + 'static, W: Write
+    where L: Location,
+          T: Segment<L, Item=Position<L>, Output=Position<L>> + IntoGroup<Float32> + 'static,
+          W: Write
 {
     fn draw(&self, screen: &mut AlternateScreen<W>) {
         let ui_box = &self.ui_box;
@@ -675,7 +681,7 @@ impl<'a, T, L, W> UIElement<W> for ElementSegmentSelector<'a, T, L, W>
             UIMessage::UIKeyPress(Key::Char('\n')) => {
                 self.selected.map(|pos| {
                     self.selected = None;
-                    let segment = self.available_segments[pos].clone();
+                    let segment = &self.available_segments[pos];
                     Box::new(state_segment_edit(segment, self.ui_events)) as Box<UIElement<W>>
                 })
             },
@@ -705,7 +711,7 @@ fn dispatch_segments<L, T>(from: Receiver<T>, to: Sender<T>, ui_events: Sender<U
     }
 }
 
-fn state_segment_edit<L, T>(segment: T, ui_events: &Sender<UIMessage>) ->
+fn state_segment_edit<L, T>(segment: &T, ui_events: &Sender<UIMessage>) ->
     BarWindow<T::GroupType, FatalityCutter>
     where L: Location,
           T: Segment<L, Item=Position<L>, Output=Position<L>> + IntoGroup<Float32>,
@@ -716,7 +722,9 @@ fn state_segment_edit<L, T>(segment: T, ui_events: &Sender<UIMessage>) ->
 }
 
 fn initial_ui_elements<'a, L, T, W>(ui_events: &'a Sender<UIMessage>, segments: Receiver<T>) -> Vec<Box<UIElement<W> + 'a>>
-    where L: Location + 'a, T: Segment<L, Item=Position<L>, Output=Position<L>> + 'static, W: Write + 'a
+    where L: Location + 'a,
+          T: Segment<L, Item=Position<L>, Output=Position<L>> + IntoGroup<Float32> + 'static,
+          W: Write + 'a
 {
     vec![Box::new(ElementQuit::new(ui_events)),
          Box::new(ElementSegmentSelector::new(segments, ui_events, whole_window()))]

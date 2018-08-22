@@ -11,7 +11,8 @@ pub struct Position<T: Location> {
     pub location: T
 }
 
-pub trait Segment<T: Location>: Index<usize> + IntoIterator + Clone + Send {
+pub trait Segment<T: Location>: Index<usize> + IntoIterator + Clone + Send
+/*    where for<'a> &'a Segment<T, Output=Self::Output, Item=Self::Item, IntoIter=Self::IntoIter>: IntoIterator */{
     fn name(&self) -> String;
 }
 
